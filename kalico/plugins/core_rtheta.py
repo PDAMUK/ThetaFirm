@@ -546,29 +546,29 @@ class CoreRThetaKinematics:
                 pos[2] = 0.0
                 toolhead.set_position(pos, homing_axes="z")
                 pos[2] = self.z_hop
-                toolhead.move(pos, self.z_hop_speed)
+                toolhead.manual_move(pos, self.z_hop_speed)
                 toolhead.wait_moves()
                 self.clear_homing_state("z")
             elif pos[2] < self.z_hop:
                 pos[2] = self.z_hop
-                toolhead.move(pos, self.z_hop_speed)
+                toolhead.manual_move(pos, self.z_hop_speed)
         # Move the probe over the homing point, facing down
         tilt_index = self.get_tilt_index()
         pos = toolhead.get_position()
         pos[tilt_index] = self.probe_b
-        toolhead.move(pos, self.b_travel_speed)
+        toolhead.manual_move(pos, self.b_travel_speed)
         pos[0] = self.z_home_x
-        toolhead.move(pos, self.z_home_travel_speed)
+        toolhead.manual_move(pos, self.z_home_travel_speed)
         # Home Z with the probe
         self._home_rail(homing_state, 2, self.rail_z)
         # Lift and point the nozzle down again
         pos = toolhead.get_position()
         if self.z_hop:
             pos[2] = max(pos[2], self.z_hop)
-            toolhead.move(pos, self.z_hop_speed)
+            toolhead.manual_move(pos, self.z_hop_speed)
         if self.restore_nozzle_after_z_home:
             pos[tilt_index] = self.nozzle_b
-            toolhead.move(pos, self.b_travel_speed)
+            toolhead.manual_move(pos, self.b_travel_speed)
 
     def _set_homing_current(self, rails, pre_homing):
         toolhead = self.toolhead
@@ -635,7 +635,7 @@ class CoreRThetaKinematics:
         if hi.retract_dist:
             pos = toolhead.get_position()
             pos[self.get_tilt_index()] = retract_b
-            toolhead.move(pos, hi.retract_speed)
+            toolhead.manual_move(pos, hi.retract_speed)
         toolhead.flush_step_generation()
 
     def _tilt_raw_move(self, b, speed, accel):
