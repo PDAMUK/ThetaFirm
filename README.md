@@ -11,6 +11,9 @@ A multi axis printer is pretty hopeless without a non-planar slicer, which is wh
 
 <img src="https://github.com/user-attachments/assets/190a966d-61a4-4c94-bd4a-7c1860c525db" width="500" />
 
+### Firmware
+The printer was built with RepRapFirmware; its configuration is in [`reprap firmware config/`](reprap%20firmware%20config). It can also run on [Kalico](https://github.com/KalicoCrew/kalico) (a Klipper fork) using the `core_rtheta` kinematics plugin in [`kalico/`](kalico/README.md), which supports both the 4 axis (X/C/Z/B) and polar (Cartesian) G-code modes.
+
 ### Assembly
 There is a wealth of knowledge in the Discussions, Pull Requests and Issues tabs of this repo. The printer is by no means "plug and play", and there are no instructions as of yet, but the information in the discussions should help you get started. Feel free to post questions on the discussions tab.
 

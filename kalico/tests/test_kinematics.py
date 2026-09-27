@@ -1,6 +1,5 @@
 # Batch-mode tests of the core_rtheta kinematics (run with pytest).
 # See sim.py for the required environment variables.
-import math
 import os
 
 import pytest

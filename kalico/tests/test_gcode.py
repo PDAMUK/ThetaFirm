@@ -1,12 +1,11 @@
 # Batch-mode tests of the core_rtheta G-code layer (run with pytest).
 import math
-import os
 import re
 
 import pytest
 import radial_gcode
 import sim
-from test_kinematics import CFG, K, START, machine_pos, run_ok
+from test_kinematics import CFG, START, machine_pos, run_ok
 
 
 def active_span(trace):

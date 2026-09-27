@@ -168,7 +168,6 @@ class TiltAxis:
         return self.kin.core_queue.trapq
 
     def check_move(self, move, ea_index):
-        self.kin.check_tilt_move(move, ea_index)
         pos = move.end_pos[ea_index]
         if pos < self.limits[0] or pos > self.limits[1]:
             if not self.is_homed():
@@ -481,9 +480,6 @@ class CoreRThetaKinematics:
             if axis_d:
                 ratio = move_d / abs(axis_d)
                 move.limit_speed(max_v * ratio, max_a * ratio)
-
-    def check_tilt_move(self, move, ea_index):
-        pass
 
     def get_status(self, eventtime):
         axes = [a for a, (l, h) in zip("xyz", self.limits) if l <= h]
