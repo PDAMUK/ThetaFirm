@@ -76,7 +76,6 @@ class CoreMotionQueue:
         self._trapq_finalize_moves = ffi_lib.trapq_finalize_moves
         self._trapq_set_position = ffi_lib.trapq_set_position
         self.b_scale = b_scale
-        self.enabled = True
         self.pending = None
         # Tilt position (degrees) at the end of the queued motion
         self.last_b = 0.0
@@ -91,8 +90,6 @@ class CoreMotionQueue:
 
     def note_kinematic_move(self, print_time, accel_t, cruise_t, decel_t,
                             start_x, axis_r_x, start_v, cruise_v, accel):
-        if not self.enabled:
-            return
         self.commit()
         self.pending = (print_time, accel_t, cruise_t, decel_t, start_x,
                         axis_r_x, start_v, cruise_v, accel)

@@ -85,3 +85,36 @@ def test_motor_off_clears_homing():
     res = run("G28\nM84")
     pos, homed = status(res)
     assert homed == ""
+
+
+def test_home_b_with_endstop_switch(tmp_path):
+    # Physical B end stop: two homing passes with a retract in between
+    import shutil
+    cfg_dir = sim.os.path.dirname(CFG)
+    shutil.copy(sim.os.path.join(cfg_dir, "macros.cfg"), tmp_path)
+    with open(CFG) as f:
+        text = f.read()
+    text = text.replace("endstop_pin: tmc2209_stepper_b:virtual_endstop",
+                        "endstop_pin: ^PD0")
+    cfg = str(tmp_path / "printer.cfg")
+    with open(cfg, "w") as f:
+        f.write(text)
+    res = sim.run(cfg, "G28 B\nTHETA_STATUS\nM400\n")
+    assert res.returncode == 0, res.log[-3000:]
+    pos, homed = status(res)
+    assert homed == "b"
+    assert pos[3] == pytest.approx(80.0)
+    # home +405, retract -10, second pass +10, final retract -10
+    d = motor_deltas(res)
+    assert d["stepper_x"] == pytest.approx(-K * 395, abs=0.02)
+    assert d["stepper_b"] == pytest.approx(K * 395, abs=0.02)
+    tr = res.steppers["stepper_b"]
+    runs = []
+    for a, b in zip(tr.steps, tr.steps[1:]):
+        step = b - a
+        if runs and (runs[-1] > 0) == (step > 0):
+            runs[-1] += step
+        else:
+            runs.append(step)
+    runs_deg = [r * tr.step_dist / K for r in runs]
+    assert runs_deg == pytest.approx([405, -10, 10, -10], abs=0.1)
