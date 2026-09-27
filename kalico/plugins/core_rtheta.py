@@ -487,10 +487,18 @@ class CoreRThetaKinematics:
 
     def get_status(self, eventtime):
         axes = [a for a, (l, h) in zip("xyz", self.limits) if l <= h]
+        axes_min, axes_max = self.axes_min, self.axes_max
+        if self.mode == MODE_POLAR:
+            # Cartesian X/Y need both the radius and the bed angle
+            if "x" not in axes or "y" not in axes:
+                axes = [a for a in axes if a == "z"]
+            r = self.rail_x.get_range()[1]
+            axes_min = axes_min._replace(x=-r, y=-r)
+            axes_max = axes_max._replace(x=r, y=r)
         return {
             "homed_axes": "".join(axes),
-            "axis_minimum": self.axes_min,
-            "axis_maximum": self.axes_max,
+            "axis_minimum": axes_min,
+            "axis_maximum": axes_max,
             "theta_mode": self.mode,
             "b_homed": self.tilt.is_homed(),
         }
@@ -664,6 +672,146 @@ def load_kinematics(toolhead, config):
 
 
 ######################################################################
+# Polar (Cartesian G-code) mode
+######################################################################
+
+
+class ThetaMoveTransform:
+    """G-code move transform.  In 4 axis mode G-code coordinates are
+    machine coordinates and moves pass straight through.  In polar mode
+    G-code X/Y are Cartesian bed coordinates: each move is split into
+    short segments that are linear in machine (X=radius, C=angle) space,
+    within polar_max_deviation of the straight Cartesian path.  The
+    toolhead then applies all machine axis limits, which automatically
+    slows moves that pass close to the bed centre."""
+
+    def __init__(self, rtheta, config):
+        self.rtheta = rtheta
+        self.printer = rtheta.printer
+        self.next_transform = None
+        self.max_deviation = config.getfloat(
+            "polar_max_deviation", 0.01, above=0.0
+        )
+        self.max_segment_angle = config.getfloat(
+            "polar_max_segment_angle", 5.0, above=0.0
+        )
+        self.min_segment_length = config.getfloat(
+            "polar_min_segment_length", 0.005, above=0.0
+        )
+        self.center_tolerance = config.getfloat(
+            "polar_center_tolerance", 0.05, minval=0.0
+        )
+
+    def is_polar(self):
+        return self.rtheta.kin.mode == MODE_POLAR
+
+    @staticmethod
+    def machine_to_cartesian(pos):
+        pos = list(pos)
+        radius, angle = pos[0], math.radians(pos[1])
+        pos[0] = radius * math.cos(angle)
+        pos[1] = radius * math.sin(angle)
+        return pos
+
+    def get_position(self):
+        pos = self.next_transform.get_position()
+        if self.is_polar():
+            return self.machine_to_cartesian(pos)
+        return pos
+
+    def move(self, newpos, speed):
+        if not self.is_polar():
+            self.next_transform.move(newpos, speed)
+            return
+        self._polar_move(newpos, speed)
+
+    # Polar mode move splitting
+    def _machine_point(self, cart, near_angle):
+        # Machine coordinates (radius >= 0) for a Cartesian point, with
+        # the bed angle unwrapped to be closest to near_angle
+        mpos = list(cart)
+        x, y = cart[0], cart[1]
+        radius = math.sqrt(x * x + y * y)
+        if radius < 1e-9:
+            angle = near_angle
+        else:
+            angle = math.degrees(math.atan2(y, x))
+            angle += 360.0 * round((near_angle - angle) / 360.0)
+        mpos[0] = radius
+        mpos[1] = angle
+        return mpos
+
+    def _subdivide(self, pa, ma, pb, mb, depth, out):
+        dx, dy = pb[0] - pa[0], pb[1] - pa[1]
+        seg_len = math.sqrt(dx * dx + dy * dy)
+        if depth < 24 and seg_len > self.min_segment_length:
+            pm = [0.5 * (a + b) for a, b in zip(pa, pb)]
+            mm_lin = [0.5 * (a + b) for a, b in zip(ma, mb)]
+            lin_xy = self.machine_to_cartesian(mm_lin)
+            dev = math.hypot(lin_xy[0] - pm[0], lin_xy[1] - pm[1])
+            if (dev > self.max_deviation
+                    or abs(mb[1] - ma[1]) > self.max_segment_angle):
+                mm = self._machine_point(pm, ma[1])
+                self._subdivide(pa, ma, pm, mm, depth + 1, out)
+                self._subdivide(pm, mm, pb, mb, depth + 1, out)
+                return
+        out.append((pa, ma, pb, mb))
+
+    @staticmethod
+    def _toolhead_dist(start, end):
+        axes_d = [e - s for s, e in zip(start, end)]
+        move_d = math.sqrt(sum([d * d for d in axes_d[:3]]))
+        if move_d < 0.000000001:
+            move_d = max([abs(d) for d in axes_d[3:]] + [0.0])
+        return move_d
+
+    def _polar_move(self, newpos, speed):
+        nt = self.next_transform
+        mstart = nt.get_position()
+        if mstart[0] < -self.center_tolerance:
+            raise self.printer.command_error(
+                "Polar mode requires X >= 0 (X=%.3f); move the carriage "
+                "to the positive side of the bed centre first"
+                % (mstart[0],)
+            )
+        cstart = self.machine_to_cartesian(mstart)
+        if abs(mstart[0]) <= self.center_tolerance:
+            # At the centre the bed angle is arbitrary - keep it
+            cstart[0] = cstart[1] = 0.0
+        segments = []
+        if (abs(newpos[0] - cstart[0]) < 1e-9
+                and abs(newpos[1] - cstart[1]) < 1e-9):
+            # No X/Y motion - keep the exact machine X and C
+            mend = list(newpos)
+            mend[0], mend[1] = mstart[0], mstart[1]
+            segments.append((cstart, mstart, list(newpos), mend))
+        else:
+            mend = self._machine_point(newpos, mstart[1])
+            self._subdivide(cstart, mstart, list(newpos), mend, 0, segments)
+        toolhead = self.printer.lookup_object("toolhead")
+        limits = (toolhead.max_velocity, toolhead.max_accel,
+                  toolhead.square_corner_velocity)
+        try:
+            for pa, ma, pb, mb in segments:
+                cart_d = self._toolhead_dist(pa, pb)
+                mach_d = self._toolhead_dist(ma, mb)
+                if not mach_d:
+                    continue
+                # Scale velocity/accel limits so they apply to the
+                # Cartesian path rather than to machine units
+                q = mach_d / cart_d if cart_d else 1.0
+                toolhead.max_velocity = limits[0] * q
+                toolhead.max_accel = limits[1] * q
+                toolhead.square_corner_velocity = limits[2] * q
+                toolhead._calc_junction_deviation()
+                nt.move(mb, speed * q)
+        finally:
+            (toolhead.max_velocity, toolhead.max_accel,
+             toolhead.square_corner_velocity) = limits
+            toolhead._calc_junction_deviation()
+
+
+######################################################################
 # G-code support ([core_rtheta] config section)
 ######################################################################
 
@@ -677,6 +825,10 @@ class CoreRTheta:
         self.inverse_time = False
         self.inverse_feed = None
         self.prev_cmds = {}
+        self.transform = ThetaMoveTransform(self, config)
+        self.initial_mode = config.getchoice(
+            "mode", {"4axis": MODE_4AXIS, "polar": MODE_POLAR}, "4axis"
+        )
         self.printer.register_event_handler(
             "klippy:connect", self._handle_connect
         )
@@ -690,7 +842,16 @@ class CoreRTheta:
                 % (KINEMATICS_NAME, KINEMATICS_NAME)
             )
         self.kin = kin
-        self.gcode_move = self.printer.lookup_object("gcode_move")
+        kin.mode = self.initial_mode
+        self.gcode_move = gm = self.printer.lookup_object("gcode_move")
+        if gm.move_transform is not None:
+            logging.warning(
+                "core_rtheta: G-code move transform '%s' will receive "
+                "machine coordinates", type(gm.move_transform).__name__
+            )
+        self.transform.next_transform = gm.set_move_transform(
+            self.transform, force=True
+        )
         gcode = self.gcode
         for cmd in ["G0", "G1", "G92", "M114", "G28"]:
             self.prev_cmds[cmd] = gcode.register_command(cmd, None)
@@ -713,9 +874,12 @@ class CoreRTheta:
             "THETA_SET_POSITION", self.cmd_THETA_SET_POSITION,
             desc=self.cmd_THETA_SET_POSITION_help,
         )
+        gcode.register_command(
+            "THETA_MODE", self.cmd_THETA_MODE, desc=self.cmd_THETA_MODE_help
+        )
 
     def get_axis_map(self):
-        # G-code letter to toolhead position index
+        # G-code letter to G-code position index
         axis_map = dict(self.gcode_move.axis_map)
         if self.kin.mode == MODE_4AXIS:
             axis_map.pop("Y", None)
@@ -723,10 +887,49 @@ class CoreRTheta:
         return axis_map
 
     def check_letters(self, gcmd):
-        if self.kin.mode == MODE_4AXIS and "Y" in gcmd.get_command_parameters():
+        params = gcmd.get_command_parameters()
+        if self.kin.mode == MODE_4AXIS and "Y" in params:
             raise gcmd.error(
                 "Y is not an axis in 4 axis mode (use C for bed rotation)"
             )
+        if self.kin.mode == MODE_POLAR and "C" in params:
+            raise gcmd.error(
+                "C is not available in polar mode (use THETA_MODE MODE=4AXIS)"
+            )
+
+    def set_mode(self, mode):
+        kin = self.kin
+        if mode == kin.mode:
+            return
+        toolhead = self.printer.lookup_object("toolhead")
+        if (mode == MODE_POLAR
+                and toolhead.get_position()[0]
+                < -self.transform.center_tolerance):
+            raise self.printer.command_error(
+                "Polar mode requires X >= 0; move the carriage to the "
+                "positive side of the bed centre first"
+            )
+        kin.mode = mode
+        # X/Y(C) now have a different meaning - drop their G-code offsets
+        gm = self.gcode_move
+        for i in (0, 1):
+            gm.base_position[i] = gm.homing_position[i]
+        gm.reset_last_position()
+
+    cmd_THETA_MODE_help = (
+        "Select 4AXIS (machine X/C/Z/B coordinates) or POLAR (Cartesian "
+        "X/Y/Z) G-code mode"
+    )
+
+    def cmd_THETA_MODE(self, gcmd):
+        mode = gcmd.get("MODE", None)
+        if mode is not None:
+            modes = {"4AXIS": MODE_4AXIS, "4-AXIS": MODE_4AXIS,
+                     "FOURAXIS": MODE_4AXIS, "POLAR": MODE_POLAR}
+            if mode.upper() not in modes:
+                raise gcmd.error("Unknown mode '%s'" % (mode,))
+            self.set_mode(modes[mode.upper()])
+        gcmd.respond_info("Core R-Theta mode: %s" % (self.kin.mode,))
 
     def calc_move_speed(self, startpos, endpos, speed_factor):
         axes_d = [ep - sp for sp, ep in zip(startpos, endpos)]
@@ -825,6 +1028,9 @@ class CoreRTheta:
         axes = [a for a in "XYZ" if a in params]
         if self.kin.mode == MODE_4AXIS and "C" in params:
             axes.append("Y")
+        if self.kin.mode == MODE_POLAR and ("X" in axes or "Y" in axes):
+            # Cartesian X and Y both need the radius and bed angle
+            axes.extend(["X", "Y"])
         if home_b:
             try:
                 self.kin.home_tilt()
@@ -885,16 +1091,13 @@ class CoreRTheta:
     )
 
     def cmd_THETA_SET_POSITION(self, gcmd):
+        # Always uses machine coordinates, in either G-code mode
         toolhead = self.printer.lookup_object("toolhead")
         kin = self.kin
         toolhead.flush_step_generation()
         pos = toolhead.get_position()
         homing_axes = ""
-        letters = [("X", 0, "x"), ("Z", 2, "z")]
-        if kin.mode == MODE_4AXIS:
-            letters.append(("C", 1, "y"))
-        else:
-            letters.append(("Y", 1, "y"))
+        letters = [("X", 0, "x"), ("C", 1, "y"), ("Z", 2, "z")]
         for letter, index, axis_name in letters:
             v = gcmd.get_float(letter, None)
             if v is not None:
