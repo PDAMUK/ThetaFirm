@@ -108,3 +108,21 @@ def test_tilt_requires_homing():
 def test_y_rejected_in_4axis_mode():
     res = sim.run(CFG, START + "G1 Y10\nM400\n")
     assert "Y is not an axis in 4 axis mode" in res.log
+
+
+@pytest.mark.parametrize("start_c", [0.0, 1.0e6, 1.0e8])
+def test_unlimited_bed_rotation(start_c):
+    # C never wraps: whole turns in both directions stay exact even at
+    # very large accumulated angles
+    res = run_ok("THETA_SET_POSITION X=50 C=%r Z=10 B=0\n"
+                 "G1 C%r F20000\nG1 C%r F20000\nM400\n"
+                 % (start_c, start_c + 3600.0, start_c - 1800.0))
+    st = res.steppers["stepper_c"]
+    runs = []
+    for a, b in zip(st.steps, st.steps[1:]):
+        if runs and (runs[-1] > 0) == (b - a > 0):
+            runs[-1] += b - a
+        else:
+            runs.append(b - a)
+    assert [r * st.step_dist for r in runs] == pytest.approx(
+        [3600.0, -5400.0], abs=1e-6)
