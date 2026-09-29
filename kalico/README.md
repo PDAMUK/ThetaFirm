@@ -197,6 +197,9 @@ keeps X ≥ 0; switching to it with the carriage past the centre is refused.
 | `TO_4AXIS`, `TO_POLAR` | Macros matching RRF `to4axis.g` / `topolar.g`. |
 | `NOZZLE_DOWN`, `PROBE_DOWN` | Rotate B to the nozzle or probe pose. |
 | `PRINT_START [MODE=] [HOTEND=]`, `PRINT_END` | Start and end macros. |
+| `SAVE_GCODE_STATE` / `RESTORE_GCODE_STATE` | Also save and restore B and the G93/G94 mode, so `PAUSE`/`RESUME` return the nozzle tilt too. |
+| `G2` / `G3` | Arcs, polar mode only (`[gcode_arcs]` is enabled; rejected in 4 axis mode). |
+| `T0`, `G10 P0 S<t>`, `M116`, `M572 D0 S<pa>` | Macros so RepRapFirmware-flavour slicer output works: tool select (no-op), tool temperature, wait for temperature, pressure advance. |
 
 Status variables for macros: `printer.toolhead.b_homed`,
 `printer.toolhead.theta_mode`, `printer.core_rtheta.mode`,
@@ -279,8 +282,12 @@ because it would move the toolhead in machine coordinates.
 * Cartesian calibration tools (`BED_MESH_CALIBRATE`, `SCREWS_TILT_CALCULATE`
   and similar) move the toolhead in machine coordinates, so they are not
   supported.  `[input_shaper]` has not been validated with this kinematics.
-* `SAVE_GCODE_STATE`/`RESTORE_GCODE_STATE` do not restore the B offset or
-  the G93/G94 state.
+* Kalico only reports unknown G-code commands; it does not stop.  For the
+  OrcaSlicer fork, the Klipper G-code flavour is recommended.  The RRF
+  compatibility macros cover the common RRF commands.
+* Object cancelling (`EXCLUDE_OBJECT`, used by Mainsail and Fluidd) works in
+  both modes.  Kalico's `exclude_object` assumes exactly four axes and would
+  crash with the B axis, so the plugin patches it at start-up.
 
 ## Tests
 
@@ -295,6 +302,9 @@ command stream and rebuild every stepper's position over time, then check:
 * polar mode: the reconstructed Cartesian path stays within tolerance of the
   ideal line, including lines through and next to the bed centre; Cartesian
   feed rates; mode round trips
+* compatibility: object cancelling, `PAUSE`/`RESUME` with tilt and feed
+  mode, arcs in polar mode, RRF-flavour commands, `FORCE_MOVE`, probe
+  commands, and unlimited bed rotation
 
 ```sh
 kalico/tests/setup_env.sh          # clones Kalico, builds the MCU dictionary, makes a venv

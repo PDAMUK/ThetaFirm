@@ -818,6 +818,7 @@ class CoreRTheta:
         self.inverse_time = False
         self.inverse_feed = None
         self.prev_cmds = {}
+        self.saved_states = {}
         self.transform = ThetaMoveTransform(self, config)
         self.initial_mode = config.getchoice(
             "mode", {"4axis": MODE_4AXIS, "polar": MODE_POLAR}, "4axis"
@@ -859,6 +860,19 @@ class CoreRTheta:
         gcode.register_command("G28", self.cmd_G28)
         gcode.register_command("G93", self.cmd_G93)
         gcode.register_command("G94", self.cmd_G94)
+        # G-code state save/restore also covers B and the feed rate mode
+        for cmd in ["SAVE_GCODE_STATE", "RESTORE_GCODE_STATE"]:
+            self.prev_cmds[cmd] = gcode.register_command(cmd, None)
+            gcode.register_command(
+                cmd, getattr(self, "cmd_" + cmd),
+                desc=getattr(gm, "cmd_" + cmd + "_help", None),
+            )
+        # Arcs ([gcode_arcs]) only make sense with Cartesian coordinates
+        for cmd in ["G2", "G3"]:
+            prev = gcode.register_command(cmd, None)
+            if prev is not None:
+                gcode.register_command(cmd, self._make_arc_handler(prev))
+        self._patch_exclude_object()
         gcode.register_command(
             "THETA_STATUS", self.cmd_THETA_STATUS,
             desc=self.cmd_THETA_STATUS_help,
@@ -1051,6 +1065,60 @@ class CoreRTheta:
     def cmd_G94(self, gcmd):
         # Units per minute feed rate mode
         self.inverse_time = False
+
+    def cmd_SAVE_GCODE_STATE(self, gcmd):
+        # gcode_move saves X/Y/Z/E; also keep B (and other extra axes)
+        # and the feed rate mode
+        self.prev_cmds["SAVE_GCODE_STATE"](gcmd)
+        gm = self.gcode_move
+        self.saved_states[gcmd.get("NAME", "default")] = {
+            "base_position": list(gm.base_position[4:]),
+            "last_position": list(gm.last_position[4:]),
+            "inverse_time": self.inverse_time,
+            "inverse_feed": self.inverse_feed,
+        }
+
+    def cmd_RESTORE_GCODE_STATE(self, gcmd):
+        state = self.saved_states.get(gcmd.get("NAME", "default"))
+        gm = self.gcode_move
+        if state is not None and len(state["base_position"]) == len(
+                gm.base_position[4:]):
+            gm.base_position[4:] = state["base_position"]
+            if gcmd.get_int("MOVE", 0):
+                # Moved together with X/Y/Z by gcode_move's restore
+                gm.last_position[4:] = state["last_position"]
+            self.inverse_time = state["inverse_time"]
+            self.inverse_feed = state["inverse_feed"]
+        self.prev_cmds["RESTORE_GCODE_STATE"](gcmd)
+
+    def _make_arc_handler(self, prev_handler):
+        def cmd_arc(gcmd):
+            if self.kin.mode != MODE_POLAR:
+                raise gcmd.error(
+                    "G2/G3 arcs require polar mode (THETA_MODE MODE=POLAR)"
+                )
+            prev_handler(gcmd)
+        return cmd_arc
+
+    def _patch_exclude_object(self):
+        # Kalico's exclude_object assumes exactly four toolhead axes (it
+        # resets its position to [x, y, z, e]) and fails with an
+        # IndexError when an object is excluded while an extra axis such
+        # as B is registered.  Grow its position list as needed.
+        eo = self.printer.lookup_object("exclude_object", None)
+        if eo is None or not hasattr(eo, "_register_transform"):
+            return
+        orig_get_position = eo.get_position
+
+        def get_position():
+            last_position = getattr(eo, "last_position", None)
+            if eo.next_transform is not None and last_position is not None:
+                need = len(eo.next_transform.get_position())
+                missing = need - len(last_position)
+                if missing > 0:
+                    last_position.extend([0.0] * missing)
+            return orig_get_position()
+        eo.get_position = get_position
 
     cmd_THETA_STATUS_help = "Report Core R-Theta kinematic state"
 

@@ -174,14 +174,24 @@ def run(cfg_path, gcode, dict_path=None, python=None, extra_files=None,
     python = python or os.environ.get("KALICO_PY", sys.executable)
     tmpdir = tempfile.mkdtemp(prefix="rtheta_sim_")
     cfg_dir = os.path.dirname(os.path.abspath(cfg_path))
+    # Kalico's file output mode stops its serial writer thread at exit
+    # without draining it, so the last commands can be lost.  Generate all
+    # remaining steps (dwell) and then wait in real time before the input
+    # ends so everything reaches the output file.
+    run_cfg = os.path.join(tmpdir, "sim_printer.cfg")
+    with open(run_cfg, "w") as f:
+        f.write("[include %s]\n\n" % (os.path.abspath(cfg_path),)
+                + "[gcode_shell_command rtheta_sim_drain]\n"
+                "command: sleep 0.3\ntimeout: 10\nverbose: False\n")
     gcode_path = os.path.join(tmpdir, "test.gcode")
     with open(gcode_path, "w") as f:
-        f.write(gcode)
+        f.write(gcode + "\nM400\nG4 P500\n"
+                "RUN_SHELL_COMMAND CMD=rtheta_sim_drain\n")
     out_path = os.path.join(tmpdir, "out.serial")
     log_path = os.path.join(tmpdir, "klippy.log")
     env = dict(os.environ)
     env["PYTHONPATH"] = kalico_dir()
-    args = [python, "-m", "klippy", os.path.abspath(cfg_path), "-i",
+    args = [python, "-m", "klippy", run_cfg, "-i",
             gcode_path, "-o", out_path, "-v", "-d", dict_path, "-l",
             log_path]
     proc = subprocess.run(args, cwd=cfg_dir, env=env, timeout=timeout,
